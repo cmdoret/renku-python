@@ -18,9 +18,11 @@
 """Test ``run`` command."""
 
 import os
+from pathlib import Path
 
 import pytest
 
+from renku.core.management.workflow.value_resolution import ValueResolver
 from renku.infrastructure.gateway.activity_gateway import ActivityGateway
 from renku.infrastructure.gateway.plan_gateway import PlanGateway
 from renku.ui.cli import cli
@@ -238,3 +240,33 @@ def test_run_prints_plan_when_stderr_redirected(split_runner, client):
     assert 0 == result.exit_code, format_result_exception(result)
     assert "Name: echo-command" in (client.path / "output").read_text()
     assert "Name:" not in result.output
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["touch", "{:%Y-%m-%d}"],
+        [
+            "--output",
+            "{a-2}_{b-3}",
+            "python",
+            "-c",
+            "import sys; f=open(sys.argv[2]+'_'+sys.argv[4], 'w'); f.write('foo'); f.close()",
+            "-a",
+            "foo",
+            "-b",
+            "bar",
+        ],
+    ],
+)
+def test_templated_parameter_run(runner, client, command, client_database_injection_manager):
+    """Test parameters with various templated values."""
+    result = runner.invoke(cli, ["run"] + command)
+
+    assert 0 == result.exit_code, format_result_exception(result)
+    with client_database_injection_manager(client):
+        plan_gateway = PlanGateway()
+        plan = plan_gateway.get_all_plans()[0]
+        rv = ValueResolver.get(plan, {})
+        for o in rv.apply().outputs:
+            Path(o.actual_value).resolve().exists()
