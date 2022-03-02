@@ -135,6 +135,8 @@ class PlanFactory:
 
         for a in arguments:
             v = str(a.actual_value) if not isinstance(a.actual_value, str) else a.actual_value
+            if isinstance(a, CommandInput):
+                v = str((self.working_dir / v).resolve())
             if a.prefix:
                 if a.prefix.endswith(" "):
                     cmd.append(a.prefix[:-1])
@@ -347,7 +349,13 @@ class PlanFactory:
         """Check an input/parameter for being a potential output directory."""
         subpaths = {str(input_path / path) for path in tree.get(input_path, default=[])}
         absolute_path = os.path.abspath(input_path)
-        if all(Path(absolute_path) != path for path, _ in self.explicit_outputs):
+        params_map = TemplateVariableFormatter.to_map(
+            chain(self.inputs, self.parameters, self.explicit_inputs, self.explicit_parameters)
+        )
+        if all(
+            Path(absolute_path) != Path(self.template_engine(path, params_map)).resolve()
+            for path, _ in self.explicit_outputs
+        ):
             content = {str(path) for path in input_path.rglob("*") if not path.is_dir() and path.name != ".gitkeep"}
             preexisting_paths = content - subpaths
             if preexisting_paths:
@@ -408,7 +416,10 @@ class PlanFactory:
         encoding_format: Optional[List[str]] = None,
     ):
         """Create a CommandInput."""
-        if self.no_input_detection and all(Path(default_value).resolve() != path for path, _ in self.explicit_inputs):
+        # TODO add template resolver
+        if self.no_input_detection and all(
+            Path(default_value).resolve() != Path(path).resolve() for path, _ in self.explicit_inputs
+        ):
             return
 
         mapped_stream = self.get_stream_mapping_for_value(default_value)
@@ -443,7 +454,10 @@ class PlanFactory:
         mapped_to: Optional[MappedIOStream] = None,
     ):
         """Create a CommandOutput."""
-        if self.no_output_detection and all(Path(default_value).resolve() != path for path, _ in self.explicit_outputs):
+        # TODO: add template resolver
+        if self.no_output_detection and all(
+            Path(default_value).resolve() != Path(path).resolve() for path, _ in self.explicit_outputs
+        ):
             return
 
         create_folder = False
@@ -515,8 +529,8 @@ class PlanFactory:
         value = Path(self._path_relative_to_root(parameter.actual_value))
         encoding_format = [DIRECTORY_MIME_TYPE] if value.resolve().is_dir() else self._get_mimetype(value)
         self.add_command_output(
-            default_value=parameter.default_value,
-            actual_value=parameter.actual_value if parameter.actual_value_set else None,
+            default_value=parameter.default_value if parameter.actual_value_set else str(value),
+            actual_value=str(value) if parameter.actual_value_set else None,
             prefix=parameter.prefix,
             position=parameter.position,
             encoding_format=encoding_format,
@@ -546,11 +560,15 @@ class PlanFactory:
 
     def add_explicit_inputs(self):
         """Add explicit inputs ."""
-        input_paths = [input.default_value for input in self.inputs]
+        input_paths = [input.actual_value for input in self.inputs]
         input_id = len(self.inputs) + len(self.parameters)
 
+        params_map = TemplateVariableFormatter.to_map(
+            chain(self.inputs, self.explicit_inputs, self.parameters, self.explicit_parameters)
+        )
         for explicit_input, name in self.explicit_inputs:
             try:
+                explicit_input = Path(self.template_engine.apply(explicit_input, params_map)).resolve()
                 relative_explicit_input = str(explicit_input.relative_to(self.working_dir))
             except ValueError:
                 raise errors.UsageError(
@@ -560,7 +578,7 @@ class PlanFactory:
 
             if relative_explicit_input in input_paths:
                 if name:
-                    existing_inputs = [i for i in self.inputs if i.default_value == relative_explicit_input]
+                    existing_inputs = [i for i in self.inputs if i.actual_value == relative_explicit_input]
 
                     for existing_input in existing_inputs:
                         existing_input.name = name
@@ -657,7 +675,7 @@ class PlanFactory:
 
             # Include explicit outputs
             candidates |= {
-                (str(Path(self.template_engine.apply(path, params_map)).absolute().relative_to(self.working_dir)), name)
+                (str(Path(self.template_engine.apply(path, params_map)).resolve().relative_to(self.working_dir)), name)
                 for path, name in self.explicit_outputs
             }
 
