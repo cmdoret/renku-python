@@ -24,7 +24,7 @@ import time
 from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import click
 import yaml
@@ -45,6 +45,7 @@ from renku.domain_model.workflow.parameter import (
     CommandInput,
     CommandOutput,
     CommandParameter,
+    CommandParameterBase,
     MappedIOStream,
 )
 from renku.domain_model.workflow.plan import Plan
@@ -284,7 +285,11 @@ class PlanFactory:
             position += 1
             default, type = self.guess_type(str(self.working_dir / self.stdin), ignore_filenames=output_streams)
             assert isinstance(default, File)
-            self.add_command_input(default_value=str(default), encoding_format=default.mime_type, position=position)
+            self.add_command_input(
+                default_value=self._path_relative_to_root(default.path),
+                encoding_format=default.mime_type,
+                position=position,
+            )
 
     def add_outputs(self, candidates: Set[Tuple[Union[Path, str], Optional[str]]]):
         """Yield detected output and changed command input parameter."""
@@ -353,7 +358,7 @@ class PlanFactory:
             chain(self.inputs, self.parameters, self.explicit_inputs, self.explicit_parameters)
         )
         if all(
-            Path(absolute_path) != Path(self.template_engine(path, params_map)).resolve()
+            Path(absolute_path) != Path(self.template_engine.apply(path, params_map)).resolve()
             for path, _ in self.explicit_outputs
         ):
             content = {str(path) for path in input_path.rglob("*") if not path.is_dir() and path.name != ".gitkeep"}
@@ -416,9 +421,9 @@ class PlanFactory:
         encoding_format: Optional[List[str]] = None,
     ):
         """Create a CommandInput."""
-        # TODO add template resolver
         if self.no_input_detection and all(
-            Path(default_value).resolve() != Path(path).resolve() for path, _ in self.explicit_inputs
+            Path(default_value).resolve() != Path(self._get_template_value(path)).resolve()
+            for path, _ in self.explicit_inputs
         ):
             return
 
@@ -454,9 +459,9 @@ class PlanFactory:
         mapped_to: Optional[MappedIOStream] = None,
     ):
         """Create a CommandOutput."""
-        # TODO: add template resolver
         if self.no_output_detection and all(
-            Path(default_value).resolve() != Path(path).resolve() for path, _ in self.explicit_outputs
+            Path(default_value).resolve() != Path(self._get_template_value(path)).resolve()
+            for path, _ in self.explicit_outputs
         ):
             return
 
@@ -771,6 +776,17 @@ class PlanFactory:
             project_id=project_gateway.get_project().id,
             success_codes=self.success_codes,
         )
+
+    def _get_template_value(
+        self, param: str, variables: Iterable[Union[CommandParameterBase, Tuple[str, str]]] = None
+    ) -> str:
+        """Substitutes the template variable for a parameter."""
+        variables_map = (
+            TemplateVariableFormatter.to_map(variables)
+            if variables
+            else chain(self.inputs, self.parameters, self.explicit_inputs, self.explicit_parameters)
+        )
+        return self.template_engine.apply(param, variables_map)
 
 
 def read_files_list(files_list: Path):
