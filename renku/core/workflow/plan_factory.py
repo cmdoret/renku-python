@@ -24,7 +24,7 @@ import time
 from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, Iterable, List, Optional, Set, Tuple, Union
 
 import click
 import yaml
@@ -37,7 +37,7 @@ from renku.core.management import RENKU_HOME
 from renku.core.util.git import is_path_safe
 from renku.core.util.metadata import is_external_file
 from renku.core.util.os import get_relative_path
-from renku.core.utils.template_vars import TemplateVariableFormatter
+from renku.core.util.template_vars import TemplateVariableFormatter
 from renku.core.workflow.types import PATH_OBJECTS, Directory, File
 from renku.domain_model.datastructures import DirectoryTree
 from renku.domain_model.workflow.parameter import (
@@ -60,7 +60,7 @@ class PlanFactory:
 
     _RE_SUBCOMMAND = re.compile(r"^[A-Za-z]+(-[A-Za-z]+)?$")
 
-    command_line: List[str]
+    _command_line: List[str]
 
     def __init__(
         self,
@@ -254,7 +254,7 @@ class PlanFactory:
                     prefix = argument
 
             else:
-                argument_value = self.template_engine.apply(argument)
+                argument_value = self._get_template_value(argument)
                 default, type = self.guess_type(argument_value, ignore_filenames=output_streams)
                 if argument_value == argument:
                     argument_value = None
@@ -354,13 +354,7 @@ class PlanFactory:
         """Check an input/parameter for being a potential output directory."""
         subpaths = {str(input_path / path) for path in tree.get(input_path, default=[])}
         absolute_path = os.path.abspath(input_path)
-        params_map = TemplateVariableFormatter.to_map(
-            chain(self.inputs, self.parameters, self.explicit_inputs, self.explicit_parameters)
-        )
-        if all(
-            Path(absolute_path) != Path(self.template_engine.apply(path, params_map)).resolve()
-            for path, _ in self.explicit_outputs
-        ):
+        if all(Path(absolute_path) != path for path, _ in self._get_paths(self.explicit_outputs)):
             content = {str(path) for path in input_path.rglob("*") if not path.is_dir() and path.name != ".gitkeep"}
             preexisting_paths = content - subpaths
             if preexisting_paths:
@@ -422,8 +416,7 @@ class PlanFactory:
     ):
         """Create a CommandInput."""
         if self.no_input_detection and all(
-            Path(default_value).resolve() != Path(self._get_template_value(path)).resolve()
-            for path, _ in self.explicit_inputs
+            Path(default_value).resolve() != path for path, _ in self._get_paths(self.explicit_inputs)
         ):
             return
 
@@ -460,8 +453,7 @@ class PlanFactory:
     ):
         """Create a CommandOutput."""
         if self.no_output_detection and all(
-            Path(default_value).resolve() != Path(self._get_template_value(path)).resolve()
-            for path, _ in self.explicit_outputs
+            Path(default_value).resolve() != path for path, _ in self._get_paths(self.explicit_outputs)
         ):
             return
 
@@ -488,11 +480,8 @@ class PlanFactory:
             postfix=mapped_stream.stream_type if mapped_stream else postfix,
         )
 
-        params_map = TemplateVariableFormatter.to_map(
-            chain(self.inputs, self.parameters, self.explicit_inputs, self.explicit_parameters)
-        )
         for eo, _ in self.explicit_outputs:
-            if default_value == self.template_engine.apply(eo, params_map):
+            if default_value == self._get_template_value(eo):
                 actual_value = default_value
                 default_value = eo
                 break
@@ -502,7 +491,6 @@ class PlanFactory:
             default_value=default_value,
             prefix=prefix,
             position=position,
-            postfix=mapped_stream.stream_type if mapped_stream else postfix,
             mapped_to=mapped_stream,
             encoding_format=encoding_format,
             postfix=postfix,
@@ -568,12 +556,8 @@ class PlanFactory:
         input_paths = [input.actual_value for input in self.inputs]
         input_id = len(self.inputs) + len(self.parameters)
 
-        params_map = TemplateVariableFormatter.to_map(
-            chain(self.inputs, self.explicit_inputs, self.parameters, self.explicit_parameters)
-        )
-        for explicit_input, name in self.explicit_inputs:
+        for explicit_input, name in self._get_paths(self.explicit_inputs):
             try:
-                explicit_input = Path(self.template_engine.apply(explicit_input, params_map)).resolve()
                 relative_explicit_input = str(explicit_input.relative_to(self.working_dir))
             except ValueError:
                 raise errors.UsageError(
@@ -664,7 +648,9 @@ class PlanFactory:
 
             candidates: Set[Tuple[Union[Path, str], Optional[str]]] = set()
 
-            params_map = TemplateVariableFormatter.to_map(chain(self.inputs, self.parameters))
+            relative_explicit_outputs = {
+                (str(path.relative_to(self.working_dir)), name) for path, name in self._get_paths(self.explicit_outputs)
+            }
 
             if not self.no_output_detection:
                 # Calculate possible output paths.
@@ -675,15 +661,11 @@ class PlanFactory:
                 candidates |= {(o.b_path, None) for o in repository.unstaged_changes if not o.deleted}
 
                 # Filter out explicit outputs
-                explicit_output_paths = {str(path.relative_to(self.working_dir)) for path, _ in self.explicit_outputs}
+                explicit_output_paths = set(map(lambda x: x[0], relative_explicit_outputs))
                 candidates = {c for c in candidates if c[0] not in explicit_output_paths}
 
             # Include explicit outputs
-            candidates |= {
-                (str(Path(self.template_engine.apply(path, params_map)).resolve().relative_to(self.working_dir)), name)
-                for path, name in self.explicit_outputs
-            }
-
+            candidates |= relative_explicit_outputs
             candidates = {(path, name) for path, name in candidates if is_path_safe(path)}
 
             self.add_outputs(candidates)
@@ -693,7 +675,7 @@ class PlanFactory:
                 if (
                     stream
                     and all(stream != path for path, _ in candidates)
-                    and (Path(os.path.abspath(stream)) != path for path, _ in self.explicit_outputs)
+                    and (Path(os.path.abspath(stream)) != path for path, _ in self._get_paths(self.explicit_outputs))
                 ):
                     unmodified.add(stream)
                 elif stream:
@@ -735,7 +717,7 @@ class PlanFactory:
 
         for name, indirect_input in read_files_list(indirect_inputs_list).items():
             # treat indirect inputs like explicit inputs
-            path = Path(os.path.abspath(indirect_input))
+            path = os.path.abspath(indirect_input)
             self.explicit_inputs.append((path, name))
 
         # add new explicit inputs (if any) to inputs
@@ -747,7 +729,7 @@ class PlanFactory:
 
         for name, indirect_output in read_files_list(indirect_outputs_list).items():
             # treat indirect outputs like explicit outputs
-            path = Path(os.path.abspath(indirect_output))
+            path = os.path.abspath(indirect_output)
             self.explicit_outputs.append((path, name))
 
     def iter_input_files(self, basedir):
@@ -781,12 +763,20 @@ class PlanFactory:
         self, param: str, variables: Iterable[Union[CommandParameterBase, Tuple[str, str]]] = None
     ) -> str:
         """Substitutes the template variable for a parameter."""
-        variables_map = (
-            TemplateVariableFormatter.to_map(variables)
-            if variables
-            else chain(self.inputs, self.parameters, self.explicit_inputs, self.explicit_parameters)
-        )
+        variables_map = TemplateVariableFormatter.to_map(variables) if variables else self.parameters_map
         return self.template_engine.apply(param, variables_map)
+
+    @property
+    def parameters_map(self):
+        """Creates a dictionary of parameters."""
+        return TemplateVariableFormatter.to_map(
+            chain(self.inputs, self.explicit_inputs, self.parameters, self.explicit_parameters)
+        )
+
+    def _get_paths(self, values: List[Tuple[str, Optional[str]]]) -> Generator[Tuple[Path, Optional[str]], None, None]:
+        """Returns a list of absolute values."""
+        for v, name in values:
+            yield (Path(self._get_template_value(v)).resolve(), name)
 
 
 def read_files_list(files_list: Path):
