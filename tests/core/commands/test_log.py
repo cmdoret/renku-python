@@ -334,7 +334,7 @@ def test_log_dataset_deleted(mocker):
     new_dataset.name = "ds"
     new_dataset.title = None
     new_dataset.description = None
-    new_dataset.derived_from.url_id = "old"
+    new_dataset.derived_from.value = "old"
     new_dataset.same_as = None
     new_dataset.dataset_files = []
     new_dataset.date_removed = datetime.utcnow()
@@ -411,7 +411,7 @@ def test_log_dataset_files_removed(mocker):
     new_dataset.name = "ds"
     new_dataset.title = None
     new_dataset.description = None
-    new_dataset.derived_from.url_id = "old"
+    new_dataset.derived_from.value = "old"
     new_dataset.same_as = None
     new_dataset.dataset_files = [old_dataset.dataset_files[0]]
     new_dataset.date_modified = datetime.utcnow()
@@ -490,7 +490,7 @@ def test_log_dataset_metadata_modified(mocker):
     new_dataset.name = "ds"
     new_dataset.title = "new-title"
     new_dataset.description = "new-description"
-    new_dataset.derived_from.url_id = "old"
+    new_dataset.derived_from.value = "old"
     new_dataset.same_as = None
     new_dataset.creators = [mocker.MagicMock(full_identity="Jane")]
     new_dataset.keywords = ["a", "c"]
